@@ -1,0 +1,192 @@
+ class SelfAttentionLayer(Layer):
+    def __init__(self, **kwargs):
+        super(SelfAttentionLayer, self).__init__(**kwargs)
+    
+    def build(self, input_shape):
+        self.WQ = self.add_weight(name="WQ", shape=(input_shape[-1], input_shape[-1]), initializer="glorot_uniform", trainable=True)
+        self.WK = self.add_weight(name="WK", shape=(input_shape[-1], input_shape[-1]), initializer="glorot_uniform", trainable=True)
+        self.WV = self.add_weight(name="WV", shape=(input_shape[-1], input_shape[-1]), initializer="glorot_uniform", trainable=True)
+        super(SelfAttentionLayer, self).build(input_shape)
+    
+    def call(self, inputs):
+        Q = tf.matmul(inputs, self.WQ)
+        K = tf.matmul(inputs, self.WK)
+        V = tf.matmul(inputs, self.WV)
+        
+        attention_scores = Dot(axes=-1)([Q, K])
+        attention_scores = Softmax()(attention_scores)
+        
+        attention_output = Dot(axes=(1, 1))([attention_scores, V])
+        return attention_output
+
+
+sequence_length = 10
+embedding_dim = 128
+
+input_tensor = tf.keras.layers.Input(shape=(sequence_length, embedding_dim))
+self_attention_output = SelfAttentionLayer()(input_tensor)
+*******************************************************************************************************************************
+
+class MultiHeadAttention(layers.Layer):
+    def __init__(self, d_model, num_heads):
+        super(MultiHeadAttention, self).__init__()
+        self.num_heads = num_heads
+        self.d_model = d_model
+        
+        assert d_model % self.num_heads == 0
+        
+        self.depth = d_model // self.num_heads
+        
+        self.wq = layers.Dense(d_model)
+        self.wk = layers.Dense(d_model)
+        self.wv = layers.Dense(d_model)
+        
+        self.dense = layers.Dense(d_model)
+        
+    def split_heads(self, x, batch_size):
+        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
+        return tf.transpose(x, perm=[0, 2, 1, 3])
+        
+
+    def call(self, x, mask=None):
+        batch_size = tf.shape(x)[0]
+        
+        q = self.wq(x)
+        k = self.wk(x)
+        v = self.wv(x)
+        
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
+        
+        matmul_qk = tf.matmul(q, k, transpose_b=True)
+        
+        d_k = tf.cast(tf.shape(k)[-1], tf.float32)
+        scaled_attention_logits = matmul_qk / tf.math.sqrt(d_k)
+        
+        if mask is not None:
+            scaled_attention_logits += (mask * -1e9)
+        
+        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+        
+        output = tf.matmul(attention_weights, v)
+        
+        output = tf.transpose(output, perm=[0, 2, 1, 3])
+
+
+
+        concat_attention = tf.reshape(output, (batch_size, -1, self.d_model))
+        
+        output = self.dense(concat_attention)
+        
+        return output, attention_weights
+
+# Example usage
+d_model = 512
+num_heads = 8
+input_shape = (None, 60, 512)  # Batch size, sequence length, embedding dimension
+
+input_layer = layers.Input(shape=input_shape[1:])
+attention_layer = MultiHeadAttention(d_model, num_heads)
+output, attn = attention_layer(input_layer, None)
+
+**********************************************************************************************************************************
+class LocalSelfAttentionLayer(Layer):
+    def __init__(self, window_size, **kwargs):
+        super(LocalSelfAttentionLayer, self).__init__(**kwargs)
+        self.window_size = window_size
+
+    def call(self, inputs):
+        batch_size, seq_length, _ = inputs.shape
+        attention_scores = []
+        
+        for i in range(seq_length):
+            start = max(0, i - self.window_size // 2)
+            end = min(seq_length, i + self.window_size // 2 + 1)
+            query = inputs[:, i, :]
+            keys = inputs[:, start:end, :]
+            attention_score = Dot(axes=-1)([query, keys])
+            attention_scores.append(attention_score)
+        
+        attention_scores = tf.stack(attention_scores, axis=1)
+        attention_scores = Softmax()(attention_scores)
+        attended_outputs = Dot(axes=(2, 2))([attention_scores, inputs])
+        return attended_outputs
+
+# Example input tensor
+input_tensor = tf.constant([[[1.0, 2.0, 3.0],
+                             [4.0, 5.0, 6.0],
+                             [7.0, 8.0, 9.0],
+                             [10.0, 11.0, 12.0]]])
+
+# Initialize Local Self-Attention layer with window size 2
+window_size = 2
+local_attention_layer = LocalSelfAttentionLayer(window_size)
+
+# Apply Local Self-Attention
+attended_output = local_attention_layer(input_tensor)
+
+**************************************************************************************************************************************
+class MaskedMultiHeadAttention(layers.Layer):
+    def __init__(self, d_model, num_heads):
+        super(MaskedMultiHeadAttention, self).__init__()
+        self.num_heads = num_heads
+        self.d_model = d_model
+        
+        assert d_model % self.num_heads == 0
+        
+        self.depth = d_model // self.num_heads
+        
+        self.wq = layers.Dense(d_model)
+        self.wk = layers.Dense(d_model)
+        self.wv = layers.Dense(d_model)
+        
+        self.dense = layers.Dense(d_model)
+        
+    def split_heads(self, x, batch_size):
+        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
+        return tf.transpose(x, perm=[0, 2, 1, 3])
+        
+    def call(self, x, mask=None):
+        batch_size = tf.shape(x)[0]
+        
+        q = self.wq(x)
+        k = self.wk(x)
+        v = self.wv(x)
+        
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
+        
+        matmul_qk = tf.matmul(q, k, transpose_b=True)
+        
+        d_k = tf.cast(tf.shape(k)[-1], tf.float32)
+        scaled_attention_logits = matmul_qk / tf.math.sqrt(d_k)
+        
+        if mask is not None:
+            scaled_attention_logits += (mask * -1e9)
+        
+        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+        
+        output = tf.matmul(attention_weights, v)
+        
+        output = tf.transpose(output, perm=[0, 2, 1, 3])
+        concat_attention = tf.reshape(output, (batch_size, -1, self.d_model))
+        
+        output = self.dense(concat_attention)
+        
+        return output, attention_weights
+
+# Example usage
+d_model = 512
+num_heads = 8
+input_shape = (None, 60, 512)  # Batch size, sequence length, embedding dimension
+
+input_layer = layers.Input(shape=input_shape[1:])
+attention_layer = MaskedMultiHeadAttention(d_model, num_heads)
+mask = tf.constant([[0, 0, 1], [0, 0, 0], [0, 1, 0]])  # Example mask, shape should be (batch_size, seq_len, seq_len)
+output, attn = attention_layer(input_layer, mask)
+
+
+
+
